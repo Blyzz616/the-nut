@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "gifs": [
+    {"id": 1,  "file": "gif01.gif", "size": 88888},
+    {"id": 2,  "file": "gif02.gif", "size": 150836},
+    {"id": 3,  "file": "gif03.gif", "size": 193576},
+    {"id": 4,  "file": "gif04.gif", "size": 279925},
+    {"id": 5,  "file": "gif05.gif", "size": 399245},
+    {"id": 6,  "file": "gif06.gif", "size": 461727},
+    {"id": 7,  "file": "gif07.gif", "size": 557135},
+    {"id": 8,  "file": "gif08.gif", "size": 568126},
+    {"id": 9,  "file": "gif09.gif", "size": 730603},
+    {"id": 10, "file": "gif10.gif", "size": 818347},
+    {"id": 11, "file": "gif11.gif", "size": 830816},
+    {"id": 12, "file": "gif12.gif", "size": 839673}
+  ]
+}
