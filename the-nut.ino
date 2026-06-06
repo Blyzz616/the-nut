@@ -12,7 +12,9 @@ enum class Gesture { NONE, TAP, DOUBLE_TAP, SWIPE_LEFT, SWIPE_RIGHT };
 
 // ── Display ───────────────────────────────────────────────────────────────────
 Arduino_DataBus *bus = new Arduino_ESP32SPI(PIN_DC, PIN_CS, PIN_SCLK, PIN_MOSI, GFX_NOT_DEFINED);
-Arduino_GFX *gfx = new Arduino_GC9A01(bus, PIN_RST, 0, true);
+Arduino_GFX *tft = new Arduino_GC9A01(bus, PIN_RST, 0, true);
+// Canvas buffers everything in RAM, flushed to display in one shot — eliminates flicker
+Arduino_Canvas *gfx = new Arduino_Canvas(240, 240, tft);
 
 // ── Globals ───────────────────────────────────────────────────────────────────
 GameState gGame;
@@ -94,6 +96,15 @@ int32_t levelSecsRemaining() {
         elapsed = millis() - gGame.levelStart;
     }
     return (int32_t)(levelDurationMs() / 1000) - (int32_t)(elapsed / 1000);
+}
+
+// Millisecond-precision remaining for smooth ring
+float levelFracRemaining() {
+    if (!gGame.running) return 1.0f;
+    uint32_t dur = levelDurationMs();
+    uint32_t elapsed = gGame.paused ? (gGame.pausedAt - gGame.levelStart) : (millis() - gGame.levelStart);
+    if (elapsed >= dur) return 0.0f;
+    return (float)(dur - elapsed) / (float)dur;
 }
 
 void togglePause() {
@@ -216,11 +227,12 @@ void clearRing() {
 
 // ── Scene draws ───────────────────────────────────────────────────────────────
 void drawBlindTimer() {
-    clearScreen();
     int32_t secs = levelSecsRemaining();
+    uint32_t now = millis();
 
     if (gGame.overtime) {
-        uint32_t elapsed = (millis() - gGame.levelStart) - levelDurationMs();
+        gfx->fillScreen(COL_BG);
+        uint32_t elapsed = (now - gGame.levelStart) - levelDurationMs();
         uint32_t s = elapsed / 1000;
         char buf[12];
         snprintf(buf, sizeof(buf), "%02lu:%02lu", s/60, s%60);
@@ -232,37 +244,111 @@ void drawBlindTimer() {
 
     if (secs < 0) secs = 0;
 
-    // SB / BB above timer
+    // ── New round intro: first 5 seconds, flash white/black every 500ms ──────
+    uint32_t introElapsed = now - gGame.roundStartMs;
+    bool inIntro = (gGame.running && !gGame.paused && introElapsed < 5000);
+
+    // ── End of round: last 3 seconds, flash red/black every 500ms ────────────
+    bool inOutro = (gGame.running && !gGame.paused && !inIntro &&
+                    secs <= 3 && secs > 0);
+
+    if (inIntro) {
+        gfx->fillScreen(COL_WHITE);
+
+        if (gGame.hasValues && gGame.currentRound < gGame.numRounds) {
+            uint32_t sb = gGame.rounds[gGame.currentRound].smallBlind;
+            uint32_t bb = gGame.rounds[gGame.currentRound].bigBlind;
+
+            char sbuf[12], bbuf[12];
+            snprintf(sbuf, sizeof(sbuf), "%lu", sb);
+            snprintf(bbuf, sizeof(bbuf), "%lu", bb);
+
+            bool stacked = (strlen(sbuf) >= 3 || strlen(bbuf) >= 3);
+
+            if (stacked) {
+                // Three lines: SB, /, BB — centered, large
+                drawCenteredText(sbuf, 60,  4, COL_BG);
+                drawCenteredText("/",  108, 4, COL_BG);
+                drawCenteredText(bbuf, 156, 4, COL_BG);
+            } else {
+                // Single line: "SB / BB"
+                char line[20];
+                snprintf(line, sizeof(line), "%s / %s", sbuf, bbuf);
+                // Pick size to fit
+                uint8_t ts = 4;
+                while (ts > 1 && (int)strlen(line) * 6 * ts > 200) ts--;
+                drawCenteredText(line, 100, ts, COL_BG);
+            }
+        } else {
+            // Timer-only game — just show "Go!"
+            drawCenteredText("Go!", 100, 4, COL_BG);
+        }
+        return;
+    }
+
+    if (inOutro) {
+        uint32_t levelElapsed = now - gGame.levelStart;
+        uint32_t durMs = levelDurationMs();
+        uint32_t remMs = (levelElapsed < durMs) ? (durMs - levelElapsed) : 0;
+        bool flashOn = ((remMs % 1000) > 500); // first half=red, second half=black
+        gfx->fillScreen(flashOn ? COL_RED : COL_BG);
+        uint16_t textCol = flashOn ? COL_BG : COL_WHITE;
+
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%02d:%02d", (int)(secs/60), (int)(secs%60));
+        drawCenteredText(buf, 96, 6, textCol);
+        return;
+    }
+
+    // ── Normal display ────────────────────────────────────────────────────────
+    gfx->fillScreen(COL_BG);
+
     if (gGame.hasValues && gGame.currentRound < gGame.numRounds) {
         char sb[20];
         snprintf(sb, sizeof(sb), "$%lu / $%lu",
                  gGame.rounds[gGame.currentRound].smallBlind,
                  gGame.rounds[gGame.currentRound].bigBlind);
-        drawCenteredText(sb, 62, 2, COL_GREY);
+        drawCenteredText(sb, 58, 2, COL_GREY);
     }
 
-    // Timer — big, centered
     char buf[8];
     snprintf(buf, sizeof(buf), "%02d:%02d", (int)(secs/60), (int)(secs%60));
     uint16_t timerCol = gGame.paused ? COL_ORANGE : COL_WHITE;
-    drawCenteredText(buf, 96, 5, timerCol);
+    drawCenteredText(buf, 82, 6, timerCol);
 
-    // PAUSED indicator
-    if (gGame.paused) {
-        drawCenteredText("PAUSED", 148, 2, COL_ORANGE);
-    }
-
-    // Round n/max below timer (or below PAUSED)
+    if (gGame.paused) drawCenteredText("PAUSED", 144, 2, COL_ORANGE);
     if (gGame.numRounds > 0) {
         char rnd[16];
         snprintf(rnd, sizeof(rnd), "Round %d/%d", gGame.currentRound+1, gGame.numRounds);
-        drawCenteredText(rnd, gGame.paused ? 172 : 155, 2, COL_GREY);
+        drawCenteredText(rnd, gGame.paused ? 166 : 148, 2, COL_GREY);
     }
 
-    // Smooth ring — only when not paused
-    if (gGame.running && !gGame.paused && secs <= RING_WARN_SECS && secs > 0) {
-        float frac = (float)secs / (float)RING_WARN_SECS;
-        drawRing(frac);
+    // Ring
+    if (gGame.running && !gGame.paused) {
+        uint32_t durMs   = levelDurationMs();
+        uint32_t elapsed = now - gGame.levelStart;
+        uint32_t remMs   = (elapsed < durMs) ? (durMs - elapsed) : 0;
+        uint32_t warnMs  = RING_WARN_SECS * 1000UL;
+
+        float frac;
+        uint16_t ringCol;
+        if (remMs > warnMs) {
+            frac    = (float)remMs / (float)durMs;
+            ringCol = 0x2945;
+        } else {
+            frac    = (float)remMs / (float)warnMs;
+            ringCol = lerpColor(0xF800, 0x07E0, frac);
+        }
+
+        int cx = DISPLAY_CX, cy = DISPLAY_CY, r1 = 118, r2 = 111;
+        for (int deg = 0; deg < 360; deg++) {
+            float rad = (deg - 90) * DEG_TO_RAD;
+            float cs = cos(rad), sn = sin(rad);
+            if ((float)deg / 360.0f <= frac) {
+                for (int r = r2; r <= r1; r++)
+                    gfx->drawPixel(cx+(int)(r*cs), cy+(int)(r*sn), ringCol);
+            }
+        }
     }
 }
 // Zones (from spec):
@@ -346,17 +432,42 @@ void drawScrollWheel(int wx, int wy, int wx2, int wy2, float offset) {
     drawTicks(cy+18, wy2,   true);
 }
 
+void flushDisplay() { gfx->flush(); }
+
+void flashValueWhite(int vx1, int vx2) {
+    int vw = vx2 - vx1, vh = SW_VAL_Y2 - SW_VAL_Y1;
+
+    // Frame 1: white background, black text
+    gfx->fillRoundRect(vx1+2, SW_VAL_Y1+2, vw-4, vh-4, 8, COL_WHITE);
+    char buf[10];
+    snprintf(buf, sizeof(buf), "%ld", _scroll.value);
+    uint8_t ts = 4;
+    while (ts > 1 && (int)strlen(buf) * 6 * ts > vw - 8) ts--;
+    gfx->setTextColor(COL_BG);
+    gfx->setTextSize(ts);
+    gfx->setCursor(vx1 + vw/2 - strlen(buf)*3*ts, SW_VAL_Y1 + vh/2 - 4*ts);
+    gfx->print(buf);
+    flushDisplay();
+    delay(120);
+
+    // Frame 2: normal — dark background, white text
+    gfx->fillRoundRect(vx1+2, SW_VAL_Y1+2, vw-4, vh-4, 8, 0x1008);
+    gfx->setTextColor(COL_WHITE);
+    gfx->setTextSize(ts);
+    gfx->setCursor(vx1 + vw/2 - strlen(buf)*3*ts, SW_VAL_Y1 + vh/2 - 4*ts);
+    gfx->print(buf);
+    flushDisplay();
+    delay(80);
+}
+
 void drawScrollValue(int vx, int vy, int vx2, int vy2, int32_t val) {
     int vw = vx2-vx, vh = vy2-vy;
-    gfx->fillRoundRect(vx+2, vy+2, vw-4, vh-4, 8, 0x1008); // dark blue
+    gfx->fillRoundRect(vx+2, vy+2, vw-4, vh-4, 8, 0x1008);
 
     char buf[10];
     snprintf(buf, sizeof(buf), "%ld", val);
-
-    // Scale text to fit
     uint8_t ts = 4;
     while (ts > 1 && (int)strlen(buf) * 6 * ts > vw - 8) ts--;
-
     gfx->setTextColor(COL_WHITE);
     gfx->setTextSize(ts);
     int tx = vx + vw/2 - strlen(buf)*3*ts;
@@ -366,7 +477,7 @@ void drawScrollValue(int vx, int vy, int vx2, int vy2, int32_t val) {
 }
 
 void drawScrollScreen(const char* title, bool backEnabled, bool backVisible,
-                      const char* nextLabel) {
+                      const char* nextLabel, const char* backLabel="Back") {
     clearScreen();
 
     // Title — centered, above y=40
@@ -382,9 +493,9 @@ void drawScrollScreen(const char* title, bool backEnabled, bool backVisible,
 
     // D — Back button (124,40 → 200,70)
     if (backVisible) {
-        uint16_t backBg = backEnabled ? COL_RED : COL_DARKGREY;
-        uint16_t backFg = backEnabled ? COL_WHITE : 0x39E7; // dimmed
-        drawButton(vx1, SW_Y1, vx2-vx1, SW_BACK_Y2-SW_Y1, "Back", backBg, backFg);
+        uint16_t backBg = backEnabled ? COL_RED : 0x7BEF; // grey for Timer
+        uint16_t backFg = COL_WHITE;
+        drawButton(vx1, SW_Y1, vx2-vx1, SW_BACK_Y2-SW_Y1, backLabel, backBg, backFg);
     }
 
     // C — Value display (124,70 → 200,170)
@@ -407,7 +518,7 @@ bool scrollUpdate(int16_t tx, int16_t ty, bool isDown) {
             if (abs(dy) > 0) {
                 _scroll.totalDrag += abs(dy);
                 int32_t step = _scroll.blindMode ? blindStep(_scroll.value) : _scroll.step;
-                float pxPerStep = _scroll.blindMode ? (3.0f * sqrtf((float)step)) : _scroll.pxPerUnit;
+                float pxPerStep = _scroll.blindMode ? (10.0f * sqrtf((float)step)) : _scroll.pxPerUnit;
                 float units = (float)dy / pxPerStep;
                 int32_t delta = (int32_t)(units) * step;
                 if (delta != 0) {
@@ -430,7 +541,7 @@ bool scrollUpdate(int16_t tx, int16_t ty, bool isDown) {
         }
         if (abs(_scroll.velocity) > 0.5f) {
             int32_t step = _scroll.blindMode ? blindStep(_scroll.value) : _scroll.step;
-            float pxPerStep = _scroll.blindMode ? (3.0f * sqrtf((float)step)) : _scroll.pxPerUnit;
+            float pxPerStep = _scroll.blindMode ? (10.0f * sqrtf((float)step)) : _scroll.pxPerUnit;
             _scroll.value      += (int32_t)(_scroll.velocity) * step;
             _scroll.value       = constrain(_scroll.value, _scroll.minVal, _scroll.maxVal);
             _scroll.wheelOffset -= _scroll.velocity * pxPerStep;
@@ -443,43 +554,6 @@ bool scrollUpdate(int16_t tx, int16_t ty, bool isDown) {
     return changed;
 }
 
-// ── Scene draws ───────────────────────────────────────────────────────────────
-void drawBlindTimer() {
-    clearScreen();
-    int32_t secs = levelSecsRemaining();
-
-    if (gGame.overtime) {
-        uint32_t elapsed = (millis() - gGame.levelStart) - levelDurationMs();
-        char buf[12];
-        uint32_t s = elapsed / 1000;
-        snprintf(buf, sizeof(buf), "%02lu:%02lu", s/60, s%60);
-        drawCenteredText("OverTime", 80, 3, COL_RED);
-        drawCenteredText(buf, 120, 4, COL_RED);
-        return;
-    }
-
-    if (secs < 0) secs = 0;
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%02d:%02d", (int)(secs/60), (int)(secs%60));
-    drawCenteredText(buf, 88, 4, COL_WHITE);
-
-    if (gGame.hasValues && gGame.currentRound < gGame.numRounds) {
-        char sb[16], bb[16];
-        snprintf(sb, sizeof(sb), "SB $%lu", gGame.rounds[gGame.currentRound].smallBlind);
-        snprintf(bb, sizeof(bb), "BB $%lu", gGame.rounds[gGame.currentRound].bigBlind);
-        drawCenteredText(sb, 148, 2, COL_GREY);
-        drawCenteredText(bb, 168, 2, COL_GREY);
-    }
-
-    if (gGame.numRounds > 0) {
-        char rnd[16];
-        snprintf(rnd, sizeof(rnd), "Round %d/%d", gGame.currentRound+1, gGame.numRounds);
-        drawCenteredText(rnd, 210, 1, COL_GREY);
-    }
-
-    if (gGame.running && secs <= RING_WARN_SECS && secs > 0)
-        drawRing((float)secs / (float)RING_WARN_SECS);
-}
 
 void drawClock() {
     clearScreen();
@@ -495,26 +569,26 @@ void drawMenu() {
     clearScreen();
     drawCenteredText("Options", 18, 2, COL_WHITE);
 
-    // PAUSE — most prominent, big, centered
     bool isPaused = gGame.paused;
-    uint16_t pauseCol = isPaused ? COL_GREEN : 0xFBE0; // amber when running, green when paused
+    uint16_t pauseCol = isPaused ? COL_GREEN : 0xFBE0;
     drawButton(30, 46, 180, 54, isPaused ? "RESUME" : "PAUSE", pauseCol);
 
-    // Next Blinds
-    drawButton(30, 108, 180, 38, "Next Blinds", COL_DARKGREY);
+    // Only show Next Blinds if not on last round
+    bool isLastRound = gGame.numRounds > 0 && gGame.currentRound >= gGame.numRounds - 1;
+    if (!isLastRound && !gGame.overtime) {
+        drawButton(30, 108, 180, 38, "Next Blinds", COL_DARKGREY);
+    }
 
-    // Speed mode
     char spd[16];
     snprintf(spd, sizeof(spd), "Speed: %s", gGame.speedMode ? "ON" : "OFF");
     drawButton(30, 154, 180, 38, spd, gGame.speedMode ? COL_ORANGE : COL_DARKGREY);
 
-    // Edit (smallest, bottom)
     drawButton(30, 200, 180, 28, "Edit Times/Values", COL_DARKGREY);
 }
 
 void drawSetupTime() {
     clearScreen();
-    drawCenteredText("Blind Time (min)", 14, 2, COL_WHITE);
+    drawCenteredText("Timer", 14, 2, COL_WHITE);
 
     int wx1 = _scroll.wheelLeft ? SW_WX1 : SW_VX1;
     int wx2 = _scroll.wheelLeft ? SW_WX2 : SW_VX2;
@@ -557,24 +631,36 @@ void drawSetupBlinds() {
     else
         snprintf(title, sizeof(title), "%d - BB", r);
 
-    // Back disabled (grey) only on round 1 SB, red otherwise
     bool isFirstSB = (gApp.setupRound == 0 && !gApp.enteringBB);
-    drawScrollScreen(title, !isFirstSB, true, "Next");
+    // On 1SB: show "Timer" button (goes back to time setup), red otherwise
+    drawScrollScreen(title, !isFirstSB, true, "Next", isFirstSB ? "Timer" : "Back");
 }
 
 void drawStartGame() {
     clearScreen();
-    // Big green GO circle
-    gfx->fillCircle(DISPLAY_CX, DISPLAY_CY, 70, COL_GREEN);
-    drawCenteredText("GO", 112, 4, COL_WHITE);
-    char summary[24];
-    snprintf(summary, sizeof(summary), "%d min", gGame.blindMinutes);
-    drawCenteredText(summary, 180, 1, COL_GREY);
-    if (gGame.numRounds > 0) {
-        char rnd[16];
-        snprintf(rnd, sizeof(rnd), "%d rounds", gGame.numRounds);
-        drawCenteredText(rnd, 195, 1, COL_GREY);
-    }
+
+    int cx = DISPLAY_CX, cy = DISPLAY_CY;
+    int r = 88;
+    uint16_t greenMid  = 0x0580;
+
+    // Simple flat circle
+    gfx->fillCircle(cx, cy, r, greenMid);
+
+    // "GO" centered with drop shadow
+    // Size 6 font: each char is 36px wide, "GO" = 72px, so start at cx-36
+    int tx = cx - 36;
+    int ty = cy - 24; // vertically centered (size 6 height = 48px)
+
+    // Drop shadow
+    gfx->setTextSize(6);
+    gfx->setTextColor(0x0200);
+    gfx->setCursor(tx + 3, ty + 3);
+    gfx->print("GO");
+
+    // Main text
+    gfx->setTextColor(COL_WHITE);
+    gfx->setCursor(tx, ty);
+    gfx->print("GO");
 }
 
 // ── Loop state ────────────────────────────────────────────────────────────────
@@ -607,9 +693,8 @@ void handleTouch(Gesture g, int16_t tx, int16_t ty) {
             // Next Blinds — y:108-146
             else if (ty >= 108 && ty <= 146) {
                 if (gGame.running) {
-                    if (gGame.paused) togglePause(); // resume before advancing
+                    if (gGame.paused) togglePause();
                     if (gGame.overtime) {
-                        // End overtime, stop game
                         gGame.overtime = false;
                         gGame.running = false;
                     } else {
@@ -617,6 +702,7 @@ void handleTouch(Gesture g, int16_t tx, int16_t ty) {
                         if (gGame.numRounds > 0 && gGame.currentRound >= gGame.numRounds)
                             gGame.overtime = true;
                         gGame.levelStart = millis();
+                        gGame.roundStartMs = millis();
                     }
                 }
                 gApp.scene = Scene::BLIND_TIMER;
@@ -649,7 +735,7 @@ void handleTouch(Gesture g, int16_t tx, int16_t ty) {
             // Tap anywhere on value display = confirm
             if (tx >= vx1 && tx <= vx2 && ty >= SW_Y1 && ty <= SW_Y2) {
                 gGame.blindMinutes = constrain(_scroll.value, 1, 60);
-                scrollInputInit(0, 0, 5000, 1, 3.0f, true);
+                scrollInputInit(1, 1, 5000, 1, 10.0f, true);
                 gApp.setupRound = 0; gApp.enteringBB = false;
                 gApp.scene = Scene::SETUP_BLINDS;
                 _forceRedraw = true;
@@ -666,56 +752,53 @@ void handleTouch(Gesture g, int16_t tx, int16_t ty) {
         }
         if (g == Gesture::TAP) {
             int vx1 = _scroll.wheelLeft ? SW_VX1 : SW_WX1;
-            bool isFirstSB = (gApp.setupRound == 0 && !gApp.enteringBB);
 
-            // Back button: vx1, y:40-70
-            if (tx >= vx1 && ty >= SW_Y1 && ty < SW_BACK_Y2 && !isFirstSB) {
-                if (gApp.enteringBB) {
-                    // Go back to SB of same round
+            if (tx >= vx1 && ty >= SW_Y1 && ty < SW_BACK_Y2) {
+                bool isFirstSB = (gApp.setupRound == 0 && !gApp.enteringBB);
+                if (isFirstSB) {
+                    // Timer button — go back to time setup
+                    scrollInputInit(gGame.blindMinutes, 1, 60, 1, 4.0f);
+                    gApp.scene = Scene::SETUP_TIME;
+                } else if (gApp.enteringBB) {
                     gApp.enteringBB = false;
-                    scrollInputInit(gGame.rounds[gApp.setupRound].smallBlind, 0, 5000, 1, 3.0f, true);
+                    int32_t savedSB = gGame.rounds[gApp.setupRound].smallBlind;
+                    int32_t minSB = (gApp.setupRound == 0) ? 1 : (int32_t)gGame.rounds[gApp.setupRound-1].bigBlind;
+                    scrollInputInit(savedSB, minSB, 5000, 1, 10.0f, true);
                 } else if (gApp.setupRound > 0) {
-                    // Go back to BB of previous round
                     gApp.setupRound--;
                     gApp.enteringBB = true;
-                    scrollInputInit(gGame.rounds[gApp.setupRound].bigBlind, 0, 5000, 1, 3.0f, true);
+                    scrollInputInit(gGame.rounds[gApp.setupRound].bigBlind, 1, 5000, 1, 10.0f, true);
                 }
                 _forceRedraw = true;
             }
             // Next button: vx1, y:170-200
             else if (tx >= vx1 && ty >= SW_NEXT_Y1 && ty <= SW_Y2) {
+                int vx2 = _scroll.wheelLeft ? SW_VX2 : SW_WX2;
+                flashValueWhite(vx1, vx2);
                 if (!gApp.enteringBB) {
-                    // Tapping Next on SB with value=0 ends blind entry
-                    if (_scroll.value == 0) {
-                        gGame.numRounds = gApp.setupRound; // no rounds if first, else use what we have
-                        gGame.hasValues = false;
-                        gApp.scene = Scene::START_GAME;
-                    } else {
-                        gGame.rounds[gApp.setupRound].smallBlind = _scroll.value;
-                        gGame.hasValues = true;
-                        // min for next round is at least this value
-                        int32_t minNext = _scroll.value;
-                        scrollInputInit(minNext, minNext, 5000, 1, 3.0f, true);
-                        gApp.enteringBB = true;
-                    }
+                    // Save SB, move to BB — no minimum forced on BB
+                    gGame.rounds[gApp.setupRound].smallBlind = _scroll.value;
+                    gGame.hasValues = true;
+                    scrollInputInit(_scroll.value, 1, 5000, 1, 10.0f, true);
+                    gApp.enteringBB = true;
                 } else {
-                    // Save BB — must be >= SB
-                    int32_t bb = max(_scroll.value, (int32_t)gGame.rounds[gApp.setupRound].smallBlind);
-                    int32_t sb = gGame.rounds[gApp.setupRound].smallBlind;
-                    gGame.rounds[gApp.setupRound].bigBlind = bb;
-                    gGame.numRounds = gApp.setupRound + 1;
+                    int32_t bb = _scroll.value;
+                    int32_t prevBB = (gApp.setupRound > 0) ? (int32_t)gGame.rounds[gApp.setupRound-1].bigBlind : 0;
 
-                    // If BB == SB for this round, or BB == previous round's BB → stop
-                    bool bbEqualsSB = (bb == sb);
-                    bool sameAsPrev = (gApp.setupRound > 0 &&
-                                       bb == (int32_t)gGame.rounds[gApp.setupRound-1].bigBlind);
-
-                    if (bbEqualsSB || sameAsPrev || gApp.setupRound + 1 >= MAX_ROUNDS) {
+                    if (bb == prevBB) {
+                        // nBB == (n-1)BB — discard round n, numRounds = n-1
+                        gGame.numRounds = gApp.setupRound;
                         gApp.scene = Scene::START_GAME;
                     } else {
-                        gApp.setupRound++;
-                        scrollInputInit(bb, bb, 5000, 1, 3.0f, true);
-                        gApp.enteringBB = false;
+                        gGame.rounds[gApp.setupRound].bigBlind = bb;
+                        gGame.numRounds = gApp.setupRound + 1;
+                        if (gApp.setupRound + 1 >= MAX_ROUNDS) {
+                            gApp.scene = Scene::START_GAME;
+                        } else {
+                            gApp.setupRound++;
+                            scrollInputInit(bb, 1, 5000, 1, 10.0f, true);
+                            gApp.enteringBB = false;
+                        }
                     }
                 }
                 _forceRedraw = true;
@@ -728,11 +811,12 @@ void handleTouch(Gesture g, int16_t tx, int16_t ty) {
         // Tap anywhere on GO circle
         if (g == Gesture::TAP) {
             int dx = tx - DISPLAY_CX, dy = ty - DISPLAY_CY;
-            if (dx*dx + dy*dy <= 70*70) {
+            if (dx*dx + dy*dy <= 88*88) {
                 gGame.running = true;
                 gGame.currentRound = 0;
                 gGame.overtime = false;
                 gGame.levelStart = millis();
+                gGame.roundStartMs = millis();
                 gApp.scene = Scene::BLIND_TIMER;
             }
         }
@@ -750,11 +834,13 @@ void updateGameLogic() {
             gGame.levelStart = millis() - levelDurationMs();
         } else {
             gGame.levelStart = millis();
+            gGame.roundStartMs = millis();
         }
     }
 }
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
+
 void setup() {
     Serial.begin(115200);
     Serial.println("[Boot] The Nut starting...");
@@ -762,10 +848,14 @@ void setup() {
     pinMode(PIN_BL, OUTPUT);
     digitalWrite(PIN_BL, HIGH);
 
+    tft->begin();
     gfx->begin();
     gfx->fillScreen(COL_BG);
+    flushDisplay();
+
     drawCenteredText("The Nut", 110, 2, COL_WHITE);
     drawCenteredText("Starting...", 130, 2, COL_GREY);
+    flushDisplay();
 
     touchInit();
 
@@ -796,6 +886,8 @@ void loop() {
         int wheelX2 = _scroll.wheelLeft ? SW_WX2 : SW_VX2;
         bool inWheel = (_wasDown && _curX >= wheelX1 && _curX <= wheelX2);
         scrollChanged = scrollUpdate(_curX, _curY, _wasDown && inWheel);
+        // Also redraw during flash
+        
     }
 
     Gesture g = gestureUpdate();
@@ -804,7 +896,7 @@ void loop() {
         handleTouch(g, _downX, _downY);
         if (gApp.scene != sceneBefore) {
             if (gApp.scene == Scene::SETUP_TIME)
-                scrollInputInit(20, 1, 60, 1, 4.0f);
+                scrollInputInit(gGame.blindMinutes, 1, 60, 1, 4.0f);
             _forceRedraw = true;
             _lastSecsShown = -999;
         }
@@ -814,11 +906,11 @@ void loop() {
     bool sceneChanged = (gApp.scene != _lastScene);
     bool timeChanged = false;
 
-    if (gApp.scene == Scene::BLIND_TIMER && gGame.running) {
-        int32_t secs = levelSecsRemaining();
-        if (secs != _lastSecsShown) { timeChanged = true; _lastSecsShown = secs; }
-        // Redraw every frame during ring (smooth animation)
-        if (secs <= RING_WARN_SECS && secs > 0) timeChanged = true;
+    if (gApp.scene == Scene::BLIND_TIMER) {
+        // Always redraw blind timer — smooth ring needs per-frame updates
+        // Paused: no need to redraw every frame, just once
+        if (!gGame.paused || sceneChanged || _forceRedraw)
+            timeChanged = true;
     } else if (gApp.scene == Scene::CLOCK) {
         if (now - _lastDraw > 1000) timeChanged = true;
     }
@@ -835,6 +927,7 @@ void loop() {
             case Scene::SETUP_BLINDS: drawSetupBlinds(); break;
             case Scene::START_GAME:   drawStartGame();   break;
         }
+        flushDisplay();
     }
 
     delay(20);
