@@ -451,7 +451,7 @@ void flashValueWhite(int vx1, int vx2) {
     delay(120);
 
     // Frame 2: normal — dark background, white text
-    gfx->fillRoundRect(vx1+2, SW_VAL_Y1+2, vw-4, vh-4, 8, 0x1008);
+    gfx->fillRoundRect(vx1+2, SW_VAL_Y1+2, vw-4, vh-4, 8, COL_BG);
     gfx->setTextColor(COL_WHITE);
     gfx->setTextSize(ts);
     gfx->setCursor(vx1 + vw/2 - strlen(buf)*3*ts, SW_VAL_Y1 + vh/2 - 4*ts);
@@ -462,7 +462,7 @@ void flashValueWhite(int vx1, int vx2) {
 
 void drawScrollValue(int vx, int vy, int vx2, int vy2, int32_t val) {
     int vw = vx2-vx, vh = vy2-vy;
-    gfx->fillRoundRect(vx+2, vy+2, vw-4, vh-4, 8, 0x1008);
+    gfx->fillRoundRect(vx+2, vy+2, vw-4, vh-4, 8, COL_BG);
 
     char buf[10];
     snprintf(buf, sizeof(buf), "%ld", val);
@@ -600,7 +600,7 @@ void drawSetupTime() {
 
     // Value display full height, same as wheel — tap to proceed
     int vw = vx2 - vx1, vh = SW_Y2 - SW_Y1;
-    gfx->fillRoundRect(vx1+2, SW_Y1+2, vw-4, vh-4, 10, 0x1008);
+    gfx->fillRoundRect(vx1+2, SW_Y1+2, vw-4, vh-4, 10, COL_BG);
 
     // Show MM:SS format
     int32_t mins = _scroll.value;
